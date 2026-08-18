@@ -1,7 +1,7 @@
 {
   "name": "FakeVoice",
-  "version": "1.0.0",
-  "description": "Send audio files as Voice Messages by typing /voice",
+  "version": "2.0.0",
+  "description": "أرسل الفيديو والصوت كرسائل صوتية",
   "authors": [
     {
       "name": "Antigravity",
