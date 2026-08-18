@@ -1,7 +1,7 @@
 {
   "name": "FakeVoice",
-  "version": "3.0.0",
-  "description": "زر فوق المايك يرسل الفيديو والصوت كرسائل صوتية",
+  "version": "4.0.0",
+  "description": "اضغط طويلاً على رسالة تحتوي صوت أو فيديو لإرسالها كرسالة صوتية",
   "authors": [
     {
       "name": "Antigravity",
