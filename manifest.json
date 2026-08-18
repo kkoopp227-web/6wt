@@ -1,0 +1,13 @@
+{
+  "name": "FakeVoice",
+  "version": "1.0.0",
+  "description": "Send audio files as Voice Messages by typing /voice",
+  "authors": [
+    {
+      "name": "Antigravity",
+      "id": "123456789012345678"
+    }
+  ],
+  "color": "#ff0000",
+  "main": "dist/plugin.js"
+}
