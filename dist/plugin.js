@@ -1,151 +1,210 @@
 window.enmity.plugins.registerPlugin({
   name: "FakeVoice",
-  version: "4.0.0",
-  description: "اضغط طويلاً على رسالة تحتوي صوت أو فيديو لإرسالها كرسالة صوتية",
+  version: "5.0.0",
+  description: "اضغط طويلاً على أي رسالة واختر ملف صوتي أو فيديو وأرسله كرسالة صوتية",
   color: "#ff0000",
 
   onStart: function () {
     try {
       const { patcher, modules, React } = window.enmity;
-
-      // ============================
-      // باتش رفع الملفات - يضيف flag الرسالة الصوتية
-      // ============================
       const UploadActions = modules.getByProps("uploadFiles") || modules.getByProps("upload");
 
-      if (UploadActions) {
-        const method = UploadActions.uploadFiles ? "uploadFiles" : "upload";
-        patcher.before("FakeVoice", UploadActions, method, function (args) {
-          const options = args[0];
-          if (options && options.__fakeVoice) {
-            if (options.uploads) {
-              options.uploads.forEach(function (u) {
-                u.waveform = "Cg==";
-                u.duration_secs = 10.0;
-              });
+      // ============================
+      // دالة فتح منتقي الملفات وإرسال كرسالة صوتية
+      // ============================
+      function sendFakeVoice(channelId) {
+        const ImagePicker = modules.getByProps("launchImageLibraryAsync") ||
+          modules.getByProps("launchImageLibrary");
+        const DocumentPicker = modules.getByProps("pickSingle") ||
+          modules.getByProps("pick") ||
+          modules.getByProps("getDocumentAsync");
+
+        function doUpload(uri, filename, mimeType) {
+          if (!UploadActions) return;
+          const method = UploadActions.uploadFiles ? "uploadFiles" : "upload";
+          UploadActions[method]({
+            channelId: channelId,
+            uploads: [{
+              filename: filename || "voice.ogg",
+              uri: uri,
+              mimeType: mimeType || "audio/ogg",
+              waveform: "Cg==",
+              duration_secs: 10.0,
+            }],
+            parsedMessage: { content: "", flags: 8192 },
+          });
+        }
+
+        // محاولة 1: expo-image-picker
+        if (ImagePicker && ImagePicker.launchImageLibraryAsync) {
+          ImagePicker.launchImageLibraryAsync({
+            mediaTypes: "All",
+            quality: 1,
+          }).then(function (result) {
+            if (!result.canceled && result.assets && result.assets[0]) {
+              const asset = result.assets[0];
+              doUpload(asset.uri, asset.fileName || "voice.mp4", asset.mimeType || asset.type || "audio/mp4");
             }
-            if (options.parsedMessage) {
-              options.parsedMessage.flags = 8192;
+          }).catch(function (e) { console.log("FakeVoice picker1 err:", e); });
+          return;
+        }
+
+        // محاولة 2: react-native-image-picker
+        if (ImagePicker && ImagePicker.launchImageLibrary) {
+          ImagePicker.launchImageLibrary(
+            { mediaType: "mixed", quality: 1 },
+            function (response) {
+              if (!response.didCancel && response.assets && response.assets[0]) {
+                const asset = response.assets[0];
+                doUpload(asset.uri, asset.fileName || "voice.mp4", asset.type || "audio/mp4");
+              }
             }
-          }
-        });
+          );
+          return;
+        }
+
+        // محاولة 3: document picker
+        if (DocumentPicker) {
+          const pick = DocumentPicker.pickSingle || DocumentPicker.pick || DocumentPicker.getDocumentAsync;
+          Promise.resolve(
+            pick({ type: ["audio/*", "video/*", "public.audio", "public.movie"] })
+          ).then(function (file) {
+            if (!file || file.canceled || file.type === "cancel") return;
+            const f = file.assets ? file.assets[0] : file;
+            doUpload(f.uri, f.name || "voice.ogg", f.mimeType || f.type || "audio/ogg");
+          }).catch(function (e) { console.log("FakeVoice picker3 err:", e); });
+        }
       }
 
       // ============================
       // باتش قائمة الضغط الطويل على الرسالة
       // ============================
-      const MessageContextMenu = modules.getByDisplayName("MessageContextMenu") ||
-        modules.getByDisplayName("MessageLongPressActionSheet") ||
-        modules.getByDisplayName("NativeMessageContextMenu");
+      const possibleNames = [
+        "MessageContextMenu",
+        "MessageLongPressActionSheet",
+        "NativeMessageContextMenu",
+        "MessageActionSheet",
+      ];
 
-      if (MessageContextMenu) {
-        const key = MessageContextMenu.default
+      let patched = false;
+
+      for (const name of possibleNames) {
+        const Comp = modules.getByDisplayName(name);
+        if (!Comp) continue;
+
+        const key = Comp.default
           ? "default"
-          : Object.keys(MessageContextMenu).find(k => typeof MessageContextMenu[k] === "function");
+          : Object.keys(Comp).find(k => typeof Comp[k] === "function");
+        if (!key) continue;
 
-        if (key) {
-          patcher.after("FakeVoice", MessageContextMenu, key, function (args, res) {
-            if (!res) return;
+        patcher.after("FakeVoice", Comp, key, function (args, res) {
+          if (!res) return;
 
-            const message = args[0] && (args[0].message || args[0]);
-            if (!message) return;
+          // استخرج channelId من props
+          const props = args[0] || {};
+          const channelId = props.channelId ||
+            (props.message && props.message.channel_id) ||
+            (props.channel && props.channel.id);
 
-            // نتأكد أن الرسالة تحتوي على مرفقات صوتية أو فيديوهات
-            const attachments = message.attachments || [];
-            const hasMedia = attachments.some(function (a) {
-              return a.content_type && (
-                a.content_type.startsWith("audio/") ||
-                a.content_type.startsWith("video/")
-              );
-            });
+          // نبني خيار "إرسال كرسالة صوتية"
+          const Row = modules.getByDisplayName("ActionSheetRow") ||
+            modules.getByDisplayName("BottomSheetRow") ||
+            modules.getByDisplayName("FormRow");
 
-            if (!hasMedia) return;
+          if (!Row) return;
+          const rowKey = Row.default ? "default" : Object.keys(Row).find(k => typeof Row[k] === "function");
+          if (!rowKey) return;
 
-            // نبني الزر الجديد بنفس شكل الأزرار الموجودة
-            const { ButtonRow, Button } = modules.getByProps("ButtonRow") ||
-              modules.getByProps("FormRow") || {};
+          const FakeVoiceItem = React.createElement(
+            Row[rowKey] || Row,
+            {
+              key: "fakeVoiceOption",
+              label: "🎙️  إرسال كرسالة صوتية",
+              onPress: function () {
+                const ActionSheet = modules.getByProps("hideActionSheet");
+                if (ActionSheet) ActionSheet.hideActionSheet();
+                setTimeout(function () {
+                  sendFakeVoice(channelId);
+                }, 300);
+              }
+            }
+          );
 
-            const ActionSheetRow = modules.getByDisplayName("BottomSheetRow") ||
-              modules.getByDisplayName("ActionSheetRow");
+          // ندخل الزر في القائمة
+          function inject(node) {
+            if (!node || !node.props) return false;
+            if (Array.isArray(node.props.children)) {
+              node.props.children.unshift(FakeVoiceItem);
+              return true;
+            }
+            if (node.props.children && node.props.children.props) {
+              return inject(node.props.children);
+            }
+            return false;
+          }
 
-            if (!ActionSheetRow && !ButtonRow) return;
+          inject(res);
+        });
 
-            const FakeVoiceItem = React.createElement(
-              ActionSheetRow || ButtonRow,
-              {
-                key: "fakeVoiceOption",
-                label: "🎙️ إرسال كرسالة صوتية",
-                icon: React.createElement(
-                  modules.getByDisplayName("Text") || "Text",
-                  { style: { fontSize: 20 } },
-                  "🎙️"
-                ),
-                onPress: function () {
-                  // إغلاق القائمة
-                  const ActionSheet = modules.getByProps("hideActionSheet");
-                  if (ActionSheet) ActionSheet.hideActionSheet();
+        patched = true;
+        break;
+      }
 
-                  // إرسال كل المرفقات الصوتية/المرئية كرسائل صوتية
-                  const ChannelActions = modules.getByProps("sendMessage");
-                  if (ChannelActions && attachments.length > 0) {
-                    attachments.forEach(function (attachment) {
-                      if (
-                        attachment.content_type &&
-                        (attachment.content_type.startsWith("audio/") ||
-                          attachment.content_type.startsWith("video/"))
-                      ) {
-                        if (UploadActions) {
-                          const uploadMethod = UploadActions.uploadFiles ? "uploadFiles" : "upload";
-                          UploadActions[uploadMethod]({
-                            channelId: message.channel_id,
-                            uploads: [{
-                              filename: attachment.filename || "audio.ogg",
-                              uri: attachment.url,
-                              mimeType: attachment.content_type,
-                              waveform: "Cg==",
-                              duration_secs: attachment.duration_secs || 10.0,
-                            }],
-                            parsedMessage: { content: "", flags: 8192 },
-                            __fakeVoice: true,
-                          });
-                        } else if (ChannelActions.sendMessage) {
-                          // بديل: نرسل رسالة بـ flag صوتي
-                          ChannelActions.sendMessage(
-                            message.channel_id,
-                            {
-                              content: "",
-                              flags: 8192,
-                              attachments: [{
-                                id: 0,
-                                filename: attachment.filename || "audio.ogg",
-                                uploaded_filename: attachment.filename,
-                                waveform: "Cg==",
-                                duration_secs: 10.0,
-                              }]
-                            }
-                          );
+      // ============================
+      // إذا فشلت كل المحاولات، استخدم باتش عام عبر getByProps
+      // ============================
+      if (!patched) {
+        const ActionSheetUtils = modules.getByProps("openLazy", "hideActionSheet");
+        if (ActionSheetUtils) {
+          patcher.before("FakeVoice", ActionSheetUtils, "openLazy", function (args) {
+            const factory = args[0];
+            const key = args[1];
+            if (typeof key === "string" && key.toLowerCase().includes("message")) {
+              const originalFactory = factory;
+              args[0] = new Promise(function (resolve) {
+                originalFactory.then(function (mod) {
+                  const Comp = mod.default || mod;
+                  if (typeof Comp === "function") {
+                    patcher.after("FakeVoice", mod, "default", function (innerArgs, res) {
+                      if (!res) return;
+                      const props = innerArgs[0] || {};
+                      const channelId = props.channelId ||
+                        (props.message && props.message.channel_id);
+
+                      const Row = modules.getByDisplayName("ActionSheetRow") ||
+                        modules.getByDisplayName("BottomSheetRow");
+                      if (!Row) return;
+                      const rk = Row.default ? "default" : Object.keys(Row).find(k => typeof Row[k] === "function");
+                      if (!rk) return;
+
+                      const btn = React.createElement(
+                        Row[rk] || Row,
+                        {
+                          key: "fakeVoiceFallback",
+                          label: "🎙️  إرسال كرسالة صوتية",
+                          onPress: function () {
+                            const AS = modules.getByProps("hideActionSheet");
+                            if (AS) AS.hideActionSheet();
+                            setTimeout(function () { sendFakeVoice(channelId); }, 300);
+                          }
                         }
+                      );
+
+                      if (res.props && Array.isArray(res.props.children)) {
+                        res.props.children.unshift(btn);
                       }
                     });
                   }
-                }
-              }
-            );
-
-            // نضيف الزر في بداية القائمة (فوق خيار الرد)
-            if (res.props && res.props.children) {
-              if (Array.isArray(res.props.children)) {
-                res.props.children.unshift(FakeVoiceItem);
-              } else if (res.props.children.props && Array.isArray(res.props.children.props.children)) {
-                res.props.children.props.children.unshift(FakeVoiceItem);
-              }
+                  resolve(mod);
+                });
+              });
             }
           });
         }
       }
 
     } catch (e) {
-      console.log("FakeVoice v4 error:", e);
+      console.log("FakeVoice v5 error:", e);
     }
   },
 
